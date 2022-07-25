@@ -1,6 +1,8 @@
+import re
 from mpi4py import MPI
 import numpy as np
 from copy import deepcopy
+import time
 
 PIXELS_PER_ROW = 64*64*4
 comm = MPI.COMM_WORLD
@@ -19,9 +21,8 @@ KERNEL = [
 def main():
     
     # TODO uncomment
+    # Read the image
     if comm.rank == 0:
-    
-        # Read the image
         with open("pepper.ascii.pgm", "r") as f:
             for _ in range(4):
                 next(f)
@@ -29,8 +30,8 @@ def main():
     else:
         image = None
 
-    # THE ABOVE SECTION SHOULD NOT BE PARALLELIZABLE
-    image = comm.bcast(image,0) # make image available to other nodes
+    # Make image available to other nodes
+    image = comm.bcast(image,0) 
 
     # Each node has a subimage
     subimage = [ [0]*64 for col in range(64) ]
@@ -55,20 +56,78 @@ def main():
             subimage_row = subimage[current_row]
             subimage_row[current_col] = image[current_pixel]
 
-    print("rank ", rank, "subimage", subimage)
+    # print("rank ", rank, "subimage", subimage)
     
     # Apply filter and request data where needed
-
     final_subimage = [ [0]*64 for col in range(64) ]
+
     for current_row in range(64):
         for current_col in range(64):
-
+            
+            # print("rank", rank, "row", current_row, "col", current_col)
+            
             for i in range(-4, 5):
                 for j in range(-4,5):
-                    requested_pixel_id = find_pixel_id(rank, current_row + i, current_col + j)
-                    [requested_pixel_rank, requested_pixel_row, requested_pixel_col] = find_subimage(requested_pixel_id)
-                    comm.Isend([requested_pixel_row, requested_pixel_col], dest=requested_pixel_rank, tag = requested_pixel_id)
-                    final_subimage[current_row][current_col] += requested_pixel * KERNEL[4+i][4+j]
+
+                    # before i receive and block, probe to see if someone wants a message from me
+                    status = MPI.Status()
+                    probe = comm.iprobe(status = status)
+                    if probe:
+                        buf = np.zeros(1, dtype=int)
+                        r = comm.Irecv(buf, source = status.Get_source(), tag = status.Get_tag()) # since we know there is a message, no waiting request
+                        r.Wait(status)
+                        print(rank, "recieved request with message", buf[0], "for pixel id", status.Get_tag(), "from", status.Get_source())
+                        
+                        # TODO fix: Asssuming this is always another node requesting a pixel 
+                        [requested_pixel_rank, requested_pixel_row, requested_pixel_col] = find_subimage(buf[0])
+                        p_value = subimage[requested_pixel_row][requested_pixel_col]
+                        p = np.array([p_value], dtype=int)
+                        comm.Isend(p, dest = status.Get_source(), tag = status.Get_tag())
+                        print(rank, "sent message for pixel id", status.Get_tag(), "to", status.Get_source())
+
+                    
+                    if (current_row+i in range(64) and current_col+j in range(64)):
+                        final_subimage[current_row][current_col] += subimage[current_row + i][current_col + j] * KERNEL[4 + i][4 + j]
+                        # print("value without requests", final_subimage[current_row][current_col])
+
+                    else:
+                        requested_pixel_id = find_pixel_id(rank, current_row + i, current_col + j)
+                        # print("req id", requested_pixel_id)
+                        if requested_pixel_id == -1:
+                            continue
+                        [requested_pixel_rank, requested_pixel_row, requested_pixel_col] = find_subimage(requested_pixel_id)
+                        # print("rank", rank, " found pixel", requested_pixel_id, "in rank", requested_pixel_rank)
+                    
+                        # This send should be sync?
+                        r_id = np.array([requested_pixel_id], dtype=int)
+                        comm.Isend(r_id, dest=requested_pixel_rank, tag = requested_pixel_id) 
+                        # print(rank, "requested pixel ", requested_pixel_id, "from", requested_pixel_rank)
+
+                        pixel_value = np.zeros(1, dtype=int)
+                        req = comm.Irecv(pixel_value, source = requested_pixel_rank, tag = requested_pixel_id)
+                        req.Wait()
+                        print(rank, "reieved pixel id", requested_pixel_id, "from", requested_pixel_rank)
+                        
+                        final_subimage[current_row][current_col] += pixel_value[0] * KERNEL[4+i][4+j]
+
+            if final_subimage[current_row][current_col] < 0:
+                final_subimage[current_row][current_col] == 0
+            elif final_subimage[current_row][current_col] > 255:
+                final_subimage[current_row][current_col] == 255
+        # TODO: how to ensure nodes stay alive? need them alive because others may request. BARRIER? 
+    
+    if rank == 0:
+        with open("output.ascii.pgm", "w") as f:
+            
+            f.write("P2")
+            f.write("256 256") 
+            f.write("255")
+            
+            for i in range(256):
+                for j in range(256):
+                    global_id = i*256+j
+                    [subimage_id, row_within_subimage, col_within_sub_image] = find_subimage(global_id)
+                    
 
 
     # Translate the pixel coordinates (current_row + i, current_col + j) to global coordinates
@@ -81,9 +140,13 @@ def main():
 # subimage_index would be the requester's rank. should pass (current_row + i) as current_row
 def find_pixel_id(subimage_index, current_row, current_col):
    
-    # TODO: consider negative values for current_row
+    if current_row < 0 or current_col < 0:
+        return -1
+
+    if subimage_index%4 == 3 and current_col>63:
+        return -1
    
-    pixels_prev_rows = current_row*256
+    pixels_prev_rows = subimage_index//4 * (64*64*4) + (current_row)*256
     pixels_curr_row_prev_subimages = (subimage_index%4)*64
     pixels_curr_row_same_subimage = current_col
 
@@ -121,15 +184,15 @@ main()
 
 # for loop over each
 
-for current_rank in range(16):
-    if comm.rank == current_rank:
+# for current_rank in range(16):
+#     if comm.rank == current_rank:
 
-        find_pixel_you_want
-        comm.recv(pixel)
+#         find_pixel_you_want
+#         comm.recv(pixel)
 
-    else:
-        while(??):
-            if irecv is not null
-                comm.send(the_requested_pixels) 
+#     else:
+#         while(??):
+#             if irecv is not null
+#                 comm.send(the_requested_pixels) 
 
 #After this for loop, every subimage would have all the pixels it needs to calculate LoG

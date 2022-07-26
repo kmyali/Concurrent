@@ -116,19 +116,16 @@ def main():
                 final_subimage[current_row][current_col] == 255
         # TODO: how to ensure nodes stay alive? need them alive because others may request. BARRIER? 
     
-    if rank == 0:
-        with open("output.ascii.pgm", "w") as f:
-            
-            f.write("P2")
-            f.write("256 256") 
-            f.write("255")
-            
-            for i in range(256):
-                for j in range(256):
-                    global_id = i*256+j
-                    [subimage_id, row_within_subimage, col_within_sub_image] = find_subimage(global_id)
+    # Writing the output
+    print("rank", rank, "started writing o/p")
+    with open("output.ascii.pgm", "w") as f:
+        
+        f.write("P2")
+        f.write("256 256")
+        f.write("255")
+        
+        f.write(" ".join(final_image))
                     
-
 
     # Translate the pixel coordinates (current_row + i, current_col + j) to global coordinates
     # figure out which subimage it belongs to
